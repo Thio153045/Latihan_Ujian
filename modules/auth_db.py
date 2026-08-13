@@ -58,6 +58,23 @@ def is_logged_in() -> bool:
 def current_user():
     return st.session_state.get(SESSION_KEY)
 
+def require_role(expected_role: str):
+    """Guard yang WAJIB dipanggil di baris pertama tiap halaman (guru atau
+    siswa). Kalau sesi login sudah tidak ada — misalnya karena aplikasi
+    baru bangun dari 'tidur' di Streamlit Cloud dan session_state server
+    sempat kosong sementara browser masih menampilkan halaman lama — atau
+    kalau role-nya tidak cocok (mis. siswa mencoba buka halaman guru lewat
+    URL langsung), halaman dihentikan dengan pesan yang jelas alih-alih
+    crash dengan error mentah seperti "NoneType is not subscriptable"."""
+    if not is_logged_in():
+        st.warning("⚠️ Sesi login sudah berakhir (mungkin karena aplikasi baru bangun dari "
+                    "'tidur'). Silakan muat ulang halaman ini (F5) untuk login kembali.")
+        st.stop()
+    user = current_user()
+    if user["role"] != expected_role:
+        st.error("Kamu tidak punya akses ke halaman ini.")
+        st.stop()
+    return user
 
 def change_password(user_id: int, new_password: str):
     db.execute(
