@@ -90,7 +90,7 @@ if "parsed_questions" in st.session_state:
             with left:
                 q_text = st.text_area("Teks soal", value=q["question"], key=f"qtext_{q['number']}", height=100)
                 new_options = {}
-                for letter in ["A", "B", "C", "D"]:
+                for letter in q["options"].keys():
                     new_options[letter] = st.text_input(
                         f"Opsi {letter}", value=q["options"].get(letter, ""), key=f"opt_{letter}_{q['number']}"
                     )
