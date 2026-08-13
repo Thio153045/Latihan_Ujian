@@ -249,11 +249,7 @@ PARSE_RESPONSE_SCHEMA = {
             "question": {"type": "string"},
             "options": {
                 "type": "object",
-                "properties": {
-                    "A": {"type": "string"}, "B": {"type": "string"},
-                    "C": {"type": "string"}, "D": {"type": "string"},
-                },
-                "required": ["A", "B", "C", "D"],
+                "additionalProperties": {"type": "string"},
             },
             "multi_answer": {"type": "boolean"},
             "n_correct": {"type": "integer"},
