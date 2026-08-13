@@ -95,7 +95,8 @@ if analyze_clicked:
         }
         for q in questions
     ]
-    with st.spinner("AI sedang menentukan jawaban benar & menyusun penjelasan..."):
+    with st.spinner("AI sedang menentukan jawaban benar & menyusun penjelasan... "
+                 "(kalau server Gemini sedang sibuk, ini otomatis dicoba ulang beberapa kali)"):
         try:
             gemini_client.configure(api_key)
             ai_result = gemini_client.analyze_answers(payload, question_images)
