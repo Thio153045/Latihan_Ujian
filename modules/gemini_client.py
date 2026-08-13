@@ -18,8 +18,12 @@ import json
 import re
 
 from google import genai
+from google.genai import types
+from PIL import Image
 
 MODEL_NAME = "gemini-2.5-flash"
+REQUEST_TIMEOUT_MS = 90_000   # 90 detik — supaya gagal jelas, bukan menggantung diam-diam
+MAX_IMAGE_DIM = 768           # gambar diperkecil sebelum dikirim ke API: lebih cepat, lebih hemat token
 
 _client = None
 
@@ -34,6 +38,17 @@ def _get_client():
     if _client is None:
         raise RuntimeError("Gemini client belum dikonfigurasi. Panggil configure(api_key) dulu.")
     return _client
+
+
+def _for_api(img: Image.Image) -> Image.Image:
+    """Perkecil gambar sebelum dikirim ke API. AI tidak perlu resolusi
+    penuh untuk membaca tabel/grafik sederhana — mengirim gambar besar
+    apa adanya cuma memperlambat request tanpa menambah akurasi."""
+    w, h = img.size
+    if max(w, h) <= MAX_IMAGE_DIM:
+        return img
+    scale = MAX_IMAGE_DIM / max(w, h)
+    return img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
 
 
 def _extract_json(text: str):
@@ -93,6 +108,20 @@ dengan skema persis:
 """
 
 
+ANALYZE_RESPONSE_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "number": {"type": "integer"},
+            "correct_answer": {"type": "array", "items": {"type": "string"}},
+            "explanation": {"type": "string"},
+        },
+        "required": ["number", "correct_answer", "explanation"],
+    },
+}
+
+
 def analyze_answers(questions_payload: list, question_images: dict, model_name: str = MODEL_NAME):
     """questions_payload: list of dict berisi number, question, options,
     multi_answer, n_correct, student_answer (list of letters).
@@ -108,10 +137,35 @@ def analyze_answers(questions_payload: list, question_images: dict, model_name: 
         img = question_images.get(q["number"])
         if img is not None:
             contents.append(f"Gambar pendukung untuk soal nomor {q['number']}:")
-            contents.append(img)
+            contents.append(_for_api(img))
 
-    resp = client.models.generate_content(model=model_name, contents=contents)
-    data = _extract_json(resp.text)
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_json_schema=ANALYZE_RESPONSE_SCHEMA,
+        max_output_tokens=8192,
+        # Soal pilihan ganda + gambar sederhana tidak butuh "thinking" lama;
+        # ini yang paling menentukan cepat/lambatnya respons.
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
+    )
+
+    try:
+        resp = client.models.generate_content(model=model_name, contents=contents, config=config)
+    except Exception as e:
+        raise RuntimeError(
+            "Permintaan ke Gemini gagal atau melebihi batas waktu (90 detik). "
+            "Coba lagi — kalau masih gagal, periksa koneksi internet atau kuota API key kamu. "
+            f"Detail teknis: {e}"
+        ) from e
+
+    if not resp.text:
+        raise RuntimeError("Gemini tidak mengembalikan jawaban apa pun (respons kosong). Coba lagi.")
+
+    try:
+        data = _extract_json(resp.text)
+    except (ValueError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"Respons AI tidak berupa JSON yang valid, coba lagi. Detail: {e}") from e
+
     if not isinstance(data, list):
         raise ValueError("Format hasil analisis AI tidak sesuai (bukan list).")
     return data
@@ -155,15 +209,56 @@ ATURAN PENTING:
 """
 
 
+PARSE_RESPONSE_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "number": {"type": "integer"},
+            "question": {"type": "string"},
+            "options": {
+                "type": "object",
+                "properties": {
+                    "A": {"type": "string"}, "B": {"type": "string"},
+                    "C": {"type": "string"}, "D": {"type": "string"},
+                },
+                "required": ["A", "B", "C", "D"],
+            },
+            "multi_answer": {"type": "boolean"},
+            "n_correct": {"type": "integer"},
+        },
+        "required": ["number", "question", "options", "multi_answer", "n_correct"],
+    },
+}
+
+
 def parse_questions(page_images: list, model_name: str = MODEL_NAME):
     """Fallback: kirim seluruh gambar halaman PDF ke Gemini untuk dipecah
     jadi soal-soal terstruktur. Dipakai hanya jika parser bawaan
     (text_parser.parse_pdf) gagal/kurang baik untuk PDF tertentu."""
     client = _get_client()
-    resp = client.models.generate_content(
-        model=model_name,
-        contents=[PARSE_PROMPT, *page_images],
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_json_schema=PARSE_RESPONSE_SCHEMA,
+        max_output_tokens=8192,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
     )
+    try:
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=[PARSE_PROMPT, *[_for_api(im) for im in page_images]],
+            config=config,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "Permintaan ke Gemini gagal atau melebihi batas waktu. Coba lagi. "
+            f"Detail teknis: {e}"
+        ) from e
+
+    if not resp.text:
+        raise RuntimeError("Gemini tidak mengembalikan jawaban apa pun (respons kosong). Coba lagi.")
+
     data = _extract_json(resp.text)
     if not isinstance(data, list):
         raise ValueError("Format hasil parsing AI tidak sesuai (bukan list).")
