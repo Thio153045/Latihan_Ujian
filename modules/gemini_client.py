@@ -16,14 +16,17 @@ aplikasi ini — dan hanya dua ini, supaya kuota API dipakai seperlunya:
 
 import json
 import re
+import time
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from PIL import Image
 
 MODEL_NAME = "gemini-2.5-flash"
 REQUEST_TIMEOUT_MS = 90_000   # 90 detik — supaya gagal jelas, bukan menggantung diam-diam
 MAX_IMAGE_DIM = 768           # gambar diperkecil sebelum dikirim ke API: lebih cepat, lebih hemat token
+MAX_RETRIES = 3                # percobaan ulang otomatis kalau server Gemini lagi sibuk (503)
+RETRY_BACKOFF_SECONDS = 4       # jeda dasar antar percobaan (naik bertahap: 4s, 8s, 12s)
 
 _client = None
 
@@ -38,6 +41,32 @@ def _get_client():
     if _client is None:
         raise RuntimeError("Gemini client belum dikonfigurasi. Panggil configure(api_key) dulu.")
     return _client
+
+
+def _generate_with_retry(client, **kwargs):
+    """Panggil generate_content dengan retry otomatis kalau server Gemini
+    sedang kebanjiran permintaan (503 UNAVAILABLE) atau kena rate limit
+    sesaat (429). Error lain (mis. API key salah) langsung dilempar tanpa
+    diulang, karena mengulang tidak akan mengubah hasilnya."""
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return client.models.generate_content(**kwargs)
+        except errors.ServerError as e:
+            last_error = e
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+                continue
+        except errors.ClientError as e:
+            if getattr(e, "status", None) == "RESOURCE_EXHAUSTED" and attempt < MAX_RETRIES:
+                last_error = e
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+                continue
+            raise
+    raise RuntimeError(
+        f"Server Gemini sedang sibuk (dicoba {MAX_RETRIES}x). Ini masalah sementara di sisi "
+        f"Google, bukan di aplikasi ini — coba lagi beberapa saat lagi. Detail teknis: {last_error}"
+    ) from last_error
 
 
 def _for_api(img: Image.Image) -> Image.Image:
@@ -150,7 +179,9 @@ def analyze_answers(questions_payload: list, question_images: dict, model_name: 
     )
 
     try:
-        resp = client.models.generate_content(model=model_name, contents=contents, config=config)
+        resp = _generate_with_retry(client, model=model_name, contents=contents, config=config)
+    except RuntimeError:
+        raise
     except Exception as e:
         raise RuntimeError(
             "Permintaan ke Gemini gagal atau melebihi batas waktu (90 detik). "
@@ -245,11 +276,13 @@ def parse_questions(page_images: list, model_name: str = MODEL_NAME):
         http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
     )
     try:
-        resp = client.models.generate_content(
-            model=model_name,
+        resp = _generate_with_retry(
+            client, model=model_name,
             contents=[PARSE_PROMPT, *[_for_api(im) for im in page_images]],
             config=config,
         )
+    except RuntimeError:
+        raise
     except Exception as e:
         raise RuntimeError(
             "Permintaan ke Gemini gagal atau melebihi batas waktu. Coba lagi. "
